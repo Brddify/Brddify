@@ -1,0 +1,8 @@
+services:
+  brddify:
+    image: gozargah/brddify:latest
+    restart: always
+    env_file: .env
+    network_mode: host
+    volumes:
+      - /var/lib/brddify:/var/lib/brddify

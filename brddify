@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+COMMAND="$1"
+
+show_menu() {
+  while true; do
+    echo "==== Brddify CLI ===="
+    echo "1) Install / Update containers (docker compose)"
+    echo "2) Setup / Renew SSL certificate (Certbot)"
+    echo "3) Exit"
+    read -rp "Choose an option [1-3]: " choice
+
+    case "$choice" in
+      1)
+        echo "[Brddify] Running installer (docker compose up -d)..."
+        "$SCRIPT_DIR/brddify.sh" install
+        ;;
+      2)
+        setup_ssl
+        ;;
+      3)
+        echo "Bye."
+        exit 0
+        ;;
+      *)
+        echo "Invalid choice."
+        ;;
+    esac
+  done
+}
+
+detect_compose() {
+  if command -v docker-compose >/dev/null 2>&1; then
+    echo "docker-compose"
+  else
+    echo "docker compose"
+  fi
+}
+
+setup_ssl() {
+  echo "[Brddify] SSL setup"
+
+  if ! command -v certbot >/dev/null 2>&1; then
+    echo "[Brddify] certbot not found, trying to install (Debian/Ubuntu)..."
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update
+      sudo apt-get install -y certbot
+    else
+      echo "[Brddify] ERROR: certbot is not installed and automatic install is not supported on this system."
+      return 1
+    fi
+  fi
+
+  read -rp "Enter your domain (e.g. example.com): " DOMAIN
+  if [ -z "$DOMAIN" ]; then
+    echo "Domain is required."
+    return 1
+  fi
+
+  read -rp "Enter your email for Let's Encrypt: " EMAIL
+  if [ -z "$EMAIL" ]; then
+    echo "Email is required."
+    return 1
+  fi
+
+  echo "[Brddify] Stopping any service that listens on port 80 (if running via docker compose)..."
+  COMPOSE_CMD=$(detect_compose)
+  if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
+    $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" stop || true
+  fi
+
+  echo "[Brddify] Requesting certificate from Let's Encrypt for $DOMAIN ..."
+  sudo certbot certonly --standalone -d "$DOMAIN" --agree-tos -m "$EMAIL" --non-interactive --preferred-challenges http || {
+    echo "[Brddify] ERROR: certbot failed."
+    return 1
+  }
+
+  CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+  KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+
+  if [ ! -f "$CERT_PATH" ] || [ ! -f "$KEY_PATH" ]; then
+    echo "[Brddify] ERROR: certificate files not found in $CERT_PATH / $KEY_PATH"
+    return 1
+  fi
+
+  ENV_FILE="$SCRIPT_DIR/.env"
+  if [ ! -f "$ENV_FILE" ]; then
+    if [ -f "$SCRIPT_DIR/.env.example" ]; then
+      cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
+      echo "[Brddify] .env created from .env.example"
+    else
+      touch "$ENV_FILE"
+      echo "[Brddify] .env created"
+    fi
+  fi
+
+  # Remove existing SSL lines
+  sed -i '/^UVICORN_SSL_CERTFILE/d' "$ENV_FILE" || true
+  sed -i '/^UVICORN_SSL_KEYFILE/d' "$ENV_FILE" || true
+
+  {
+    echo "UVICORN_SSL_CERTFILE="$CERT_PATH""
+    echo "UVICORN_SSL_KEYFILE="$KEY_PATH""
+  } >> "$ENV_FILE"
+
+  echo "[Brddify] Updated .env with SSL paths."
+
+  if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
+    echo "[Brddify] Starting Brddify containers with SSL..."
+    $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" up -d
+  fi
+
+  echo "[Brddify] SSL setup completed. Brddify should now serve HTTPS using Uvicorn SSL options."
+}
+
+if [ -z "$COMMAND" ]; then
+  show_menu
+else
+  case "$COMMAND" in
+    ssl)
+      setup_ssl
+      ;;
+    install)
+      "$SCRIPT_DIR/brddify.sh" install
+      ;;
+    *)
+      show_menu
+      ;;
+  esac
+fi
